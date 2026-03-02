@@ -16,7 +16,7 @@ networkPolicy:
 server:
   image:
     repository: ghcr.io/decentralized-identity/didwebvh-server-py
-    tag: 0.5.0
+    tag: "0.5.0"
     pullPolicy: IfNotPresent
     pullSecrets: []
 
@@ -81,7 +81,7 @@ postgres:
     tag: "18.1"
 
   auth:
-    existingSecret: '{{ printf "%s-postgres" .Release.Name }}'
+    existingSecret: "{{ printf \"%s-postgres\" .Release.Name }}"
     secretKeys:
       adminPasswordKey: postgres-password
 
@@ -89,7 +89,7 @@ postgres:
   customUser:
     name: "webvh-admin"
     database: "webvh"
-    existingSecret: '{{ printf "%s-postgres" .Release.Name }}'
+    existingSecret: "{{ printf \"%s-postgres\" .Release.Name }}"
     secretKeys:
       name: user
       database: database
