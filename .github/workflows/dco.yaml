@@ -1,0 +1,14 @@
+# DCO (Developer Certificate of Origin) check for pull requests.
+# All commits must include a "Signed-off-by" line. Use: git commit -s
+name: DCO Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  dco:
+    name: DCO
+    runs-on: ubuntu-latest
+    steps:
+      - uses: KineticCafe/actions-dco@v1

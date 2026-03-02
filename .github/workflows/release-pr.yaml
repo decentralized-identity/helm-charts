@@ -1,0 +1,283 @@
+name: Generate Release PRs
+
+on:
+  workflow_dispatch:
+    inputs:
+      chart:
+        description: "Optional: limit to a single chart name (leave empty for all charts)"
+        required: false
+        default: ""
+        type: string
+      force_bump:
+        description: "Force a patch release even if no releasable commits found (requires chart input)"
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    - cron: '0 2 * * *'
+  push:
+    branches: [main]
+    paths: ['charts/**']
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-pr:
+    runs-on: ubuntu-latest
+    env:
+      CHART_INPUT: ${{ github.event.inputs.chart || '' }}
+      FORCE_BUMP: ${{ github.event.inputs.force_bump || 'false' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Load version pins
+        uses: ./.github/actions/load-pins
+
+      - name: Validate inputs
+        if: ${{ github.event.inputs.force_bump == 'true' && github.event.inputs.chart == '' }}
+        run: |
+          echo "::error::force_bump=true requires a specific chart to be specified"
+          exit 1
+
+      - name: Install generators (pinned)
+        uses: ./.github/actions/install-generators
+
+      - name: Configure git
+        run: |
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+
+      - name: Discover charts needing release
+        id: discover
+        shell: bash
+        run: |
+          if [ -n "${CHART_INPUT}" ]; then
+            if [ -d "charts/${CHART_INPUT}" ]; then
+              charts="${CHART_INPUT}"
+              echo "Scoping to input chart: ${CHART_INPUT}"
+            else
+              echo "::error::Input chart '${CHART_INPUT}' not found under charts/"
+              exit 1
+            fi
+          else
+            charts="$(find charts -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null || true)"
+          fi
+
+          charts_needing_release=()
+          while IFS= read -r chart; do
+            [ -z "$chart" ] && continue
+            echo "::group::Checking ${chart}"
+
+            last_commit_for_chart=$(git log -1 --pretty=%s -- "charts/${chart}/")
+            if [[ "$last_commit_for_chart" == "chore(${chart}): prepare release"* ]]; then
+              echo "⏭️  ${chart}: last commit is a release prep, skipping"
+              echo "::endgroup::"
+              continue
+            fi
+
+            last_tag="$(git tag --list "${chart}-*" | sort -V | tail -1 || true)"
+            echo "Last tag for ${chart}: ${last_tag:-none}"
+
+            chmod +x hack/release/*.sh
+            classify_output="$(hack/release/classify_commits.sh "charts/${chart}" "$last_tag")" || {
+              echo "::error::Failed to classify commits for ${chart}"
+              continue
+            }
+            eval "$classify_output"
+
+            if [ "${BUMP_LEVEL}" = "none" ] && [ "${FORCE_BUMP}" = "true" ] && [ -n "${CHART_INPUT}" ]; then
+              echo "⚠️  ${chart}: forcing patch bump (no releasable commits, but force_bump=true)"
+              BUMP_LEVEL="patch"
+            fi
+
+            if [ "${BUMP_LEVEL}" != "none" ] && [ -n "${BUMP_LEVEL}" ]; then
+              echo "✅ ${chart} needs ${BUMP_LEVEL} bump"
+              charts_needing_release+=("${chart}")
+            else
+              echo "⏭️  ${chart} has no changes requiring release"
+            fi
+            echo "::endgroup::"
+          done <<< "$charts"
+
+          if [ ${#charts_needing_release[@]} -eq 0 ]; then
+            echo "::notice::No charts require a release"
+            echo "charts_json=[]" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Charts needing release: ${charts_needing_release[*]}"
+            printf '%s\n' "${charts_needing_release[@]}" | jq -R -s -c 'split("\n") | map(select(length>0))' > /tmp/charts.json
+            echo "charts_json=$(cat /tmp/charts.json)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Process release PRs
+        if: steps.discover.outputs.charts_json != '[]'
+        shell: bash
+        env:
+          CHARTS_JSON: ${{ steps.discover.outputs.charts_json }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE_BUMP: ${{ github.event.inputs.force_bump || 'false' }}
+          CHART_INPUT: ${{ github.event.inputs.chart || '' }}
+        run: |
+          charts=$(echo "$CHARTS_JSON" | jq -r '.[]')
+
+          for chart in $charts; do
+            echo "::group::Processing release for ${chart}"
+
+            last_tag="$(git tag --list "${chart}-*" | sort -V | tail -1 || true)"
+            echo "Last tag: ${last_tag:-none}"
+
+            current_version="$(yq '.version' "charts/${chart}/Chart.yaml")"
+            classify_output="$(hack/release/classify_commits.sh "charts/${chart}" "$last_tag")" || {
+              echo "::error::Failed to classify commits for ${chart}"
+              echo "::endgroup::"
+              continue
+            }
+            eval "$classify_output"
+            auto_bump="${BUMP_LEVEL}"
+            echo "Current version: ${current_version}"
+            echo "Automatic bump level: ${auto_bump}"
+
+            override=""
+            skip="false"
+            existing_pr=$(gh pr list --state open --json number,labels,headRefName | jq -r --arg prefix "release/${chart}-" 'map(select(.headRefName | startswith($prefix))) | .[0] // empty')
+            if [ -n "$existing_pr" ]; then
+              labels=$(echo "$existing_pr" | jq -r '.labels[].name')
+              if echo "$labels" | grep -q "skip-release"; then
+                echo "::notice::Found 'skip-release' label, skipping ${chart}"
+                skip="true"
+              elif echo "$labels" | grep -q "bump:major"; then
+                override="major"
+              elif echo "$labels" | grep -q "bump:minor"; then
+                override="minor"
+              elif echo "$labels" | grep -q "bump:patch"; then
+                override="patch"
+              fi
+              if [ -n "$override" ]; then
+                echo "::notice::Label override detected: ${override}"
+              fi
+            fi
+
+            if [ "$skip" = "true" ]; then
+              echo "::endgroup::"
+              continue
+            fi
+
+            if [ "$auto_bump" = "none" ] && [ "${FORCE_BUMP}" = "true" ] && [ -n "${CHART_INPUT}" ]; then
+              auto_bump="patch"
+              echo "::notice::Forcing patch bump for ${chart}"
+            fi
+            final_bump="${override:-$auto_bump}"
+            if [ "$final_bump" = "none" ]; then
+              echo "::warning::No bump needed for ${chart}, skipping"
+              echo "::endgroup::"
+              continue
+            fi
+
+            if [ -z "$last_tag" ]; then
+              next_version="$current_version"
+              echo "Next version: ${next_version} (first release, using Chart.yaml version)"
+            else
+              next_version="$(hack/release/next_version.sh "$current_version" "" "$final_bump")"
+              echo "Next version: ${next_version} (${final_bump} bump)"
+            fi
+
+            branch="release/${chart}-v${next_version}"
+            git switch -c "$branch" 2>/dev/null || git switch "$branch"
+
+            hack/release/update_chart_version.sh "charts/${chart}" "$next_version"
+
+            printf '{"name":"%s-chart","version":"%s"}' "${chart}" "$next_version" > package.json
+            npx conventional-changelog -p conventionalcommits --tag-prefix "${chart}-" --commit-path "charts/${chart}" -i "charts/${chart}/CHANGELOG.md" -s || true
+            rm -f package.json
+
+            echo "🔍 Detecting documentation format for ${chart}..."
+            doc_tool="none"
+            values_file="charts/${chart}/values.yaml"
+
+            if grep -q "^## @param" "${values_file}"; then
+              doc_tool="readme-generator"
+              echo "✅ Detected readme-generator format (## @param annotations)"
+            elif grep -q "^# --" "${values_file}"; then
+              doc_tool="helm-docs"
+              echo "✅ Detected helm-docs format (# -- annotations)"
+            else
+              echo "⚠️  No documentation annotations found in values.yaml"
+            fi
+
+            if [ "${doc_tool}" = "helm-docs" ]; then
+              if command -v helm-docs > /dev/null 2>&1; then
+                echo "📝 Generating README with helm-docs"
+                helm-docs -c "charts/${chart}"
+              else
+                echo "::warning::helm-docs not found, skipping README generation"
+              fi
+            elif [ "${doc_tool}" = "readme-generator" ]; then
+              echo "📝 Generating README with readme-generator"
+              npx @bitnami/readme-generator-for-helm --readme "charts/${chart}/README.md" --values "charts/${chart}/values.yaml"
+            else
+              echo "⚠️  Skipping README generation (no documentation annotations found)"
+            fi
+
+            git add "charts/${chart}/Chart.yaml" "charts/${chart}/CHANGELOG.md" "charts/${chart}/README.md"
+            if git diff --cached --quiet; then
+              echo "::warning::No changes to commit for ${chart}"
+              echo "::endgroup::"
+              continue
+            fi
+
+            git commit -m "chore(${chart}): prepare release v${next_version}" \
+                       -m "Automated Release PR preparation" \
+                       -m "" \
+                       -m "Bump: ${final_bump}" \
+                       -m "Previous version: ${current_version}" \
+                       -m "Next version: ${next_version}"
+
+            git push origin "${branch}" --force
+            echo "✅ Pushed branch: ${branch}"
+
+            existing_pr_number=$(gh pr list --state open --head "${branch}" --json number --jq '.[0].number' || echo "")
+            compare_url="https://github.com/${{ github.repository }}/compare/${last_tag:-main}...${branch}"
+
+            pr_body=$(cat <<EOF
+          Automated Release PR for **${chart}** v${next_version}
+
+          ## Release Information
+          - **Chart:** ${chart}
+          - **Current version:** ${current_version}
+          - **Next version:** ${next_version}
+          - **Bump type:** ${final_bump}
+          - **Compare:** ${compare_url}
+
+          ## Label Overrides
+          - \`bump:major\` - Force major version bump
+          - \`bump:minor\` - Force minor version bump
+          - \`bump:patch\` - Force patch version bump
+          - \`skip-release\` - Defer this release
+
+          Merge this PR to publish the chart.
+          EOF
+              )
+
+              if [ -n "$existing_pr_number" ]; then
+                gh pr edit "$existing_pr_number" \
+                  --title "release(${chart}): v${next_version}" \
+                  --body "$pr_body"
+                echo "✅ Updated PR #${existing_pr_number}"
+              else
+                gh pr create \
+                  --head "${branch}" \
+                  --base main \
+                  --title "release(${chart}): v${next_version}" \
+                  --body "$pr_body" \
+                  --label "release-pr"
+                echo "✅ Created new PR"
+              fi
+
+            git switch main
+
+            echo "::endgroup::"
+          done

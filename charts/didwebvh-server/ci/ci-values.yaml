@@ -1,0 +1,9 @@
+# CI values for chart-testing install (ephemeral kind cluster)
+# Disable persistence so no PVC is required
+postgres:
+  enabled: true
+  persistence:
+    enabled: false
+
+server:
+  replicaCount: 1

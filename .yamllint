@@ -1,0 +1,24 @@
+---
+# yamllint configuration for Helm charts
+extends: default
+
+ignore: |
+  charts/**/templates/**
+  charts/**/charts/**
+  charts/**/ci/**
+  charts/**/README.md
+  charts/**/CHANGELOG.md
+
+rules:
+  truthy:
+    allowed-values: ['true', 'false', 'yes', 'no', 'on', 'off']
+    check-keys: false
+  document-start: disable
+  indentation:
+    spaces: 2
+    indent-sequences: true
+  comments-indentation: disable
+  empty-values:
+    forbid-in-block-mappings: false
+    forbid-in-flow-mappings: false
+  line-length: disable
