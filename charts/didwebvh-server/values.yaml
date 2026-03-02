@@ -65,8 +65,6 @@ server:
     ingress:
       podSelector: {}
 
-
-
 postgres:
   enabled: true
 
