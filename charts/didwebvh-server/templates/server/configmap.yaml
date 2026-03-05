@@ -11,6 +11,10 @@ metadata:
 data:
   WEBVH_DOMAIN: {{ .Values.server.host | quote }}
   APP_PORT: {{ .Values.server.service.apiPort | quote }}
+  {{- if .Values.postgres.enabled }}
+  POSTGRES_DB: {{ (.Values.postgres.customUser.database | default "webvh") | quote }}
+  POSTGRES_USER: {{ (.Values.postgres.customUser.name | default "webvh-admin") | quote }}
+  {{- end }}
   {{- if .Values.server.workers }}
   APP_WORKERS: {{ .Values.server.workers | quote }}
   {{- end }}

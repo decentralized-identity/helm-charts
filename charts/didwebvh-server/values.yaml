@@ -83,7 +83,8 @@ postgres:
     secretKeys:
       adminPasswordKey: postgres-password
 
-  # Dedicated application user and DB (chart creates both; we add schema grants in initdb.scripts)
+  # Dedicated application user and DB (CloudPirates subchart creates both; we add schema grants in initdb.scripts).
+  # The server deployment sets POSTGRES_DB/POSTGRES_USER from these values so the app uses the DB we create.
   customUser:
     name: "webvh-admin"
     database: "webvh"
