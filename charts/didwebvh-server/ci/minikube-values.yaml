@@ -1,0 +1,13 @@
+# Values for testing the chart on minikube (e.g. from WSL + Docker Desktop).
+# Use: helm install webvh ./charts/didwebvh-server -f ./charts/didwebvh-server/ci/minikube-values.yaml
+# The server gets POSTGRES_DB/POSTGRES_USER from postgres.customUser so it uses the DB we create.
+
+postgres:
+  enabled: true
+  persistence:
+    enabled: false
+
+server:
+  replicaCount: 1
+  service:
+    type: NodePort
